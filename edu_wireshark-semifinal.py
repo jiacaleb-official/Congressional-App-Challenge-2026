@@ -202,8 +202,9 @@ def hex_dump(data, width=16):
 
 class PacketEngine:
     # handles either real capture (scapy) or the fake demo traffic
-    def __init__(self, on_packet_callback):
+    def __init__(self, on_packet_callback, on_fallback=None):
         self.on_packet_callback = on_packet_callback
+        self.on_fallback = on_fallback  # called if live capture fails and we switch to demo
         self.running = False
         self.counter = 0
         self.start_time = None
@@ -257,13 +258,15 @@ class PacketEngine:
                   store=False)
         except Exception:
             self.demo_mode = True
+            if self.on_fallback:
+                self.on_fallback()
             self.start_demo_capture()
 
     # scripted sequence for demo mode - dns lookup, tcp handshake, some data,
     # a ping, then closing the connection. tried to make it look realistic
     DEMO_SCRIPT = [
-        ("UDP", "192.168.1.20", "8.8.8.8", 5353, 53, "-", "DNS query: example.com A?"),
-        ("UDP", "8.8.8.8", "192.168.1.20", 53, 5353, "-", "DNS response: 93.184.216.34"),
+        ("DNS", "192.168.1.20", "8.8.8.8", 5353, 53, "-", "DNS query: example.com A?"),
+        ("DNS", "8.8.8.8", "192.168.1.20", 53, 5353, "-", "DNS response: 93.184.216.34"),
         ("TCP", "192.168.1.20", "93.184.216.34", 51422, 443, "SYN", "TCP handshake step 1: SYN"),
         ("TCP", "93.184.216.34", "192.168.1.20", 443, 51422, "SYN, ACK", "TCP handshake step 2: SYN-ACK"),
         ("TCP", "192.168.1.20", "93.184.216.34", 51422, 443, "ACK", "TCP handshake step 3: ACK (connected!)"),
@@ -360,7 +363,7 @@ class EduSniffApp:
         self.tutorial_mode = tk.BooleanVar(value=True)
         self.dark_mode = tk.BooleanVar(value=False)
         self.filter_var = tk.StringVar()
-        self.engine = PacketEngine(self.on_new_packet)
+        self.engine = PacketEngine(self.on_new_packet, self.on_capture_fallback)
 
         self.achievements = {k: False for k, _, _ in ACHIEVEMENTS_DEF}
         self.quiz_score = 0
@@ -376,6 +379,17 @@ class EduSniffApp:
         mode_txt = "LIVE capture ready" if SCAPY_AVAILABLE else \
                    "DEMO MODE (scapy/admin not detected - using simulated traffic)"
         self.status.set(mode_txt)
+
+        messagebox.showinfo(
+            "Responsible Use",
+            "Only capture traffic on networks you own or have permission "
+            "to monitor. Packet data can contain private information."
+        )
+
+    def on_capture_fallback(self):
+        # called from the capture thread, so hand the status update to the main thread
+        self.root.after(0, lambda: self.status.set(
+            "Live capture failed (needs admin/sudo + Npcap) - switched to Demo Mode."))
 
     def _load_highscore(self):
         try:
@@ -478,7 +492,8 @@ class EduSniffApp:
         container.pack(fill=tk.BOTH, expand=True, padx=6, pady=4)
 
         left = ttk.Frame(container)
-        left.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        # left.pack() happens further down, AFTER the right panel is packed,
+        # so the Explain panel always gets its space first
 
         cols = ("No.", "Time", "Source", "Destination", "Protocol", "Length", "Info")
         self.tree = ttk.Treeview(left, columns=cols, show="headings", height=18)
@@ -496,11 +511,11 @@ class EduSniffApp:
         self.tree.bind("<Button-3>", self.on_right_click)
 
         for proto, color in PROTOCOL_COLORS.items():
-            self.tree.tag_configure(proto, background=color)
+            self.tree.tag_configure(proto, background=color, foreground="#000000")
 
         hexframe = ttk.LabelFrame(left, text="Byte-Level View (Hex + ASCII)")
         hexframe.pack(fill=tk.BOTH, expand=False, pady=(6, 0), side=tk.BOTTOM)
-        self.hex_box = scrolledtext.ScrolledText(hexframe, height=8, font=("Consolas", 9), wrap=tk.NONE)
+        self.hex_box = scrolledtext.ScrolledText(hexframe, width=70, height=8, font=("Consolas", 9), wrap=tk.NONE)
         self.hex_box.pack(fill=tk.BOTH, expand=True, padx=4, pady=4)
         self.hex_box.insert(tk.END, "Select a packet to see its raw bytes here.")
         self.hex_box.config(state=tk.DISABLED)
@@ -508,6 +523,7 @@ class EduSniffApp:
         right = ttk.LabelFrame(container, text="Explain This Packet")
         right.pack(side=tk.RIGHT, fill=tk.BOTH, expand=False, padx=(8, 0))
         right.configure(width=430)
+        left.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
 
         self.explain_box = scrolledtext.ScrolledText(right, width=54, height=30,
                                                        wrap=tk.WORD, font=("Consolas", 10))
